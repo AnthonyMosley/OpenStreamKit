@@ -154,7 +154,10 @@ pip install -r requirements.txt
 
 ### 4️⃣ Configure environment variables
 Create a `.env` file in the project root:
-
+>**Kick:**
+>To obtain the required API credentials, create a developer application in your Kick account at
+>https://kick.com/settings/developer>
+>Your Client ID and Client Secret generated there must be provided as environment variables.
 ```env
 KICK_CLIENT_ID=your_client_id
 KICK_CLIENT_SECRET=your_client_secret
