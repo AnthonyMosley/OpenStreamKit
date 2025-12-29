@@ -24,7 +24,6 @@ from fastapi import Header
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
-from fastapi import Query
 import urllib.parse
 
 # ===================================================================== CONFIG / CONSTANTS =====================================================================
