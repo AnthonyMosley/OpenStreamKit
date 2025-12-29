@@ -12,15 +12,18 @@ Goal: become a local-first stream automation tool that can be extended over time
 # ===================================================================== IMPORTS =====================================================================
 import base64
 import hashlib
-import os
-import secrets
-import urllib.parse
 import json
-import requests
 import logging
-from fastapi import FastAPI, Request, Body
-from dotenv import load_dotenv
+import os
+import requests
+import secrets
 from colorlog import ColoredFormatter
+from dotenv import load_dotenv
+from fastapi import Body, FastAPI, Request
+from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.staticfiles import StaticFiles
+from fastapi.templating import Jinja2Templates
+import urllib.parse
 
 # ===================================================================== CONFIG / CONSTANTS =====================================================================
 # Load environment variables from .env (must happen before reading os.environ / os.getenv)
@@ -122,28 +125,41 @@ app = FastAPI(
     redoc_url=None if DISABLE_DOCS else "/redoc",
     openapi_url=None if DISABLE_DOCS else "/openapi.json",
 )
+app.mount("/static",StaticFiles(directory="web"),name="static")
+templates=Jinja2Templates(directory="web")
+
+@app.get("/")
+def root():
+    return RedirectResponse("/login")
 
 
-@app.get("/login")
-def login():
+@app.get("/login", response_class=HTMLResponse)
+def login_page(request: Request):
     verifier = pkce_verifier()
     challenge = pkce_challenge_s256(verifier)
     state = secrets.token_urlsafe(16)
 
     PKCE_STORE[state] = verifier
 
-    # Required query params per Kick OAuth docs :contentReference[oaicite:3]{index=3}
     q = {
         "response_type": "code",
         "client_id": CLIENT_ID,
         "redirect_uri": REDIRECT_URI,
-        "scope": "events:subscribe",   # needed to subscribe to chat.message.sent :contentReference[oaicite:4]{index=4}
+        "scope": "events:subscribe",
         "code_challenge": challenge,
         "code_challenge_method": "S256",
         "state": state,
     }
-    url = f"{OAUTH_HOST}/oauth/authorize?{urllib.parse.urlencode(q)}"  # :contentReference[oaicite:5]{index=5}
-    return {"open_this_url_in_browser": url}
+    auth_url = f"{OAUTH_HOST}/oauth/authorize?{urllib.parse.urlencode(q)}"
+
+    return templates.TemplateResponse(
+        "index.html",
+        {
+            "request": request,
+            "auth_url": auth_url,
+        },
+    )
+
 
 @app.get("/callback")
 def callback(code: str, state: str):
