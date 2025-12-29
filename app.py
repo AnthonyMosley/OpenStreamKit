@@ -20,9 +20,11 @@ import secrets
 from colorlog import ColoredFormatter
 from dotenv import load_dotenv
 from fastapi import Body, FastAPI, Request
+from fastapi import Header
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+from fastapi import Query
 import urllib.parse
 
 # ===================================================================== CONFIG / CONSTANTS =====================================================================
@@ -112,6 +114,30 @@ def handle_follow(payload):
     if DEBUG_PAYLOADS:
         save_json(payload,"last_follow.json")
 
+def do_subscribe(access_token: str) -> dict:
+    body = {
+        "events": [
+            {"name": "chat.message.sent", "version": 1},
+            {"name": "channel.followed", "version": 1},
+            {"name": "channel.subscription.created", "version": 1},
+            {"name": "channel.subscription.gifted", "version": 1},
+        ],
+        "method": "webhook",
+    }
+
+    r = requests.post(
+        f"{API_HOST}/public/v1/events/subscriptions",
+        json=body,
+        headers={"Authorization": f"Bearer {access_token}"},
+        timeout=20,
+    )
+
+    return {
+        "status_code": r.status_code,
+        "text": r.text,
+        "json": r.json() if r.headers.get("content-type","").startswith("application/json") else None,
+    }
+
 # ===================================================================== STARTUP LOGIC (RUNS ONCE) =====================================================================
 os.makedirs(JSON_DIR, exist_ok=True)
 
@@ -160,14 +186,33 @@ def login_page(request: Request):
         },
     )
 
+@app.get("/success", response_class=HTMLResponse)
+def success_page(request: Request):
+    return templates.TemplateResponse("success.html", {"request": request})
+
+@app.get("/failure", response_class=HTMLResponse)
+def failure_page(request: Request, msg: str | None = None):
+    return templates.TemplateResponse("failure.html", {"request": request, "message": msg})
+
+@app.get("/partial-success", response_class=HTMLResponse)
+def partial_success_page(request: Request, msg: str | None = None):
+    return templates.TemplateResponse(
+        "partial_success.html",
+        {
+            "request": request,
+            "message": msg,
+            "webhook_url": WEBHOOK_URL,
+        },
+    )
 
 @app.get("/callback")
 def callback(code: str, state: str):
     verifier = PKCE_STORE.pop(state, None)
     if not verifier:
-        return {"error": "Unknown/expired state (restart login)"}
+        log.warning("OAuth callback with invalid or expired state")
+        msg = urllib.parse.quote("Invalid or expired login session (state). Please try again.")
+        return RedirectResponse(f"/failure?msg={msg}", status_code=302)
 
-    # Exchange code for token via POST /oauth/token :contentReference[oaicite:6]{index=6}
     data = {
         "grant_type": "authorization_code",
         "client_id": CLIENT_ID,
@@ -176,59 +221,81 @@ def callback(code: str, state: str):
         "code_verifier": verifier,
         "code": code,
     }
-    r = requests.post(
-        f"{OAUTH_HOST}/oauth/token",
-        data=data,
-        headers={"Content-Type": "application/x-www-form-urlencoded"},
-        timeout=20,
-    )
-    r.raise_for_status()
+
+    try:
+        r = requests.post(
+            f"{OAUTH_HOST}/oauth/token",
+            data=data,
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+            timeout=20,
+        )
+        r.raise_for_status()
+    except requests.RequestException as e:
+        # Log the juicy details server-side, show a clean summary to the user
+        status = getattr(getattr(e, "response", None), "status_code", None)
+        body = getattr(getattr(e, "response", None), "text", "")
+        log.error("Token exchange failed. status=%s body=%s err=%s", status, body, e)
+
+        clean = "Token exchange failed. Check redirect URI + client credentials."
+        msg = urllib.parse.quote(clean)
+        return RedirectResponse(f"/failure?msg={msg}", status_code=302)
+
     token = r.json()
-    save_json(token,TOKEN_FILE)
+    save_json(token, TOKEN_FILE)
     access_token = token["access_token"]
 
     TOKENS["access_token"] = access_token
 
-    return {
-        "ok": True,
-        "next": "Call POST /subscribe (open /subscribe in browser)",
-        "token_keys": list(token.keys()),
-    }
+    sub = do_subscribe(access_token)
+    save_json(sub, "last_subscribe_response.json")
+    log.info("Auto-subscribe: %s", sub["status_code"])
+
+    if sub.get("status_code", 0) >= 400:
+        msg = urllib.parse.quote(
+            "Authorized OK, but event subscription failed. See json/last_subscribe_response.json."
+        )
+        return RedirectResponse(f"/partial-success?msg={msg}", status_code=302)
+
+    return RedirectResponse("/success", status_code=302)
+
 
 @app.post("/subscribe")
-def subscribe():
-    """
-    Subscribes to chat.message.sent via Kick events subscriptions endpoint :contentReference[oaicite:7]{index=7}
-    """
+def subscribe(accept: str | None = Header(default=None)):
     access_token = TOKENS.get("access_token")
     if not access_token:
+        if accept and "text/html" in accept:
+            msg = urllib.parse.quote("No token yet. Go to /login first.")
+            return RedirectResponse(f"/failure?msg={msg}", status_code=302)
         return {"error": "No token yet. Go to /login first."}
 
-    body = {
-        "events": [
-            {"name": "chat.message.sent", "version": 1},
+    result = do_subscribe(access_token)
+    save_json(result, "last_subscribe_response.json")
 
-            # Social
-            {"name": "channel.followed", "version": 1},
+    if accept and "text/html" in accept:
+      if result.get("status_code", 0) >= 400:
+          msg = urllib.parse.quote("Retry failed. Check json/last_subscribe_response.json.")
+          return RedirectResponse(f"/partial-success?msg={msg}", status_code=302)
+      return RedirectResponse("/success", status_code=302)
 
-            # Monetization (common alert types)
-            {"name": "channel.subscription.created", "version": 1},
-            {"name": "channel.subscription.gifted", "version": 1},
-        ],
-        "method": "webhook",
-    }
+    return result
 
-    r = requests.post(
-        f"{API_HOST}/public/v1/events/subscriptions",
-        json=body,
-        headers={"Authorization": f"Bearer {access_token}"},
-        timeout=20,
-    )
-    log.info("[SUBSCRIBE]%s %s", r.status_code, r.text)
-    return {
-        "status_code": r.status_code,
-        "response": r.json() if r.headers.get("content-type","").startswith("application/json") else r.text
-    }
+@app.get("/subscribe-ui")
+def subscribe_ui():
+    access_token = TOKENS.get("access_token")
+    if not access_token:
+        msg = urllib.parse.quote("No token available. Please log in first.")
+        return RedirectResponse(f"/failure?msg={msg}", status_code=302)
+
+    result = do_subscribe(access_token)
+    save_json(result, "last_subscribe_response.json")
+
+    if result.get("status_code", 0) >= 400:
+        msg = urllib.parse.quote(
+            "Subscription retry failed. Check json/last_subscribe_response.json."
+        )
+        return RedirectResponse(f"/partial-success?msg={msg}", status_code=302)
+
+    return RedirectResponse("/success", status_code=302)
 
 @app.post("/kick/webhook")
 async def kick_webhook(payload: dict = Body(...)):

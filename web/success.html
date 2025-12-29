@@ -1,0 +1,376 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>OpenStreamKit · Authorized</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+
+  <style>
+    :root{
+      --bg0:#070A12;
+      --bg1:#0b1020;
+      --fg:#eaf1ff;
+      --muted:#9aa7bf;
+
+      --a1:#7c7cff;
+      --a2:#22d3ee;
+      --a3:#34d399;
+      --a4:#f472b6;
+
+      --glass: rgba(255,255,255,.06);
+      --border: rgba(255,255,255,.14);
+      --shadow: rgba(0,0,0,.55);
+    }
+
+    *{ box-sizing:border-box; }
+    html,body{ height:100%; }
+    body{
+      margin:0;
+      font-family: system-ui, -apple-system, Segoe UI, Roboto, Inter, sans-serif;
+      color:var(--fg);
+      background:
+        radial-gradient(1200px 600px at 10% -10%, #1f2a44 0%, transparent 60%),
+        radial-gradient(900px 600px at 95% 10%, #091a2b 0%, transparent 55%),
+        linear-gradient(180deg, var(--bg0), var(--bg1));
+      overflow:hidden;
+      display:grid;
+      place-items:center;
+    }
+
+    .blob{
+      position:fixed;
+      width:520px;
+      height:520px;
+      filter: blur(42px);
+      opacity:.58;
+      pointer-events:none;
+      transform: translate3d(0,0,0);
+      mix-blend-mode: screen;
+      animation: drift 14s ease-in-out infinite;
+    }
+    .blob.b1{
+      left:-160px; top:-170px;
+      background: radial-gradient(circle at 30% 30%, rgba(124,124,255,.95), transparent 60%);
+    }
+    .blob.b2{
+      right:-200px; top:30px;
+      background: radial-gradient(circle at 40% 40%, rgba(34,211,238,.95), transparent 62%);
+      animation-duration: 16s;
+      animation-delay: -3s;
+    }
+    .blob.b3{
+      left:18%; bottom:-240px;
+      background: radial-gradient(circle at 35% 35%, rgba(52,211,153,.85), transparent 60%);
+      animation-duration: 18s;
+      animation-delay: -6s;
+    }
+    .blob.b4{
+      right:12%; bottom:-260px;
+      background: radial-gradient(circle at 35% 35%, rgba(244,114,182,.65), transparent 62%);
+      animation-duration: 20s;
+      animation-delay: -9s;
+    }
+
+    @keyframes drift{
+      0%   { transform: translate(0,0) scale(1); }
+      50%  { transform: translate(30px, -25px) scale(1.08); }
+      100% { transform: translate(0,0) scale(1); }
+    }
+
+    main.card{
+      width:min(520px, 92vw);
+      padding: 30px 28px 22px;
+      border-radius: 20px;
+      background: linear-gradient(180deg, rgba(255,255,255,.10), rgba(255,255,255,.03));
+      backdrop-filter: blur(18px) saturate(150%);
+      -webkit-backdrop-filter: blur(18px) saturate(150%);
+      border: 1px solid var(--border);
+      box-shadow: 0 34px 90px var(--shadow), inset 0 1px 0 rgba(255,255,255,.06);
+      position:relative;
+      overflow:hidden;
+      animation: pop .85s cubic-bezier(.2,.85,.2,1);
+    }
+
+    @keyframes pop{
+      from{ opacity:0; transform: translateY(16px) scale(.98); }
+      to  { opacity:1; transform: translateY(0) scale(1); }
+    }
+
+    main.card::before{
+      content:"";
+      position:absolute;
+      inset:-1px;
+      border-radius: inherit;
+      background: linear-gradient(120deg,
+        transparent 22%,
+        rgba(124,124,255,.55),
+        rgba(34,211,238,.55),
+        rgba(52,211,153,.45),
+        rgba(244,114,182,.35),
+        transparent 78%
+      );
+      opacity:.45;
+      pointer-events:none;
+
+      mask: linear-gradient(#000,#000) content-box, linear-gradient(#000,#000);
+      -webkit-mask-composite: xor;
+      mask-composite: exclude;
+      padding:1px;
+    }
+
+    main.card::after{
+      content:"";
+      position:absolute;
+      inset:-120px -220px;
+      background: linear-gradient(120deg, transparent 35%, rgba(255,255,255,.12), transparent 65%);
+      transform: rotate(10deg) translateX(-40%);
+      animation: sheen 6.2s ease-in-out infinite;
+      pointer-events:none;
+      opacity:.35;
+    }
+    @keyframes sheen{
+      0%, 55% { transform: rotate(10deg) translateX(-55%); }
+      100%    { transform: rotate(10deg) translateX(35%); }
+    }
+
+    .toprow{
+      display:flex;
+      align-items:center;
+      justify-content:space-between;
+      gap:12px;
+      margin-bottom: 10px;
+      position:relative;
+      z-index:1;
+    }
+
+    .badge{
+      display:inline-flex;
+      align-items:center;
+      gap:8px;
+      padding: 7px 10px;
+      border-radius: 999px;
+      background: rgba(255,255,255,.06);
+      border: 1px solid rgba(255,255,255,.12);
+      color: var(--muted);
+      font-size: 12px;
+      letter-spacing:.2px;
+      user-select:none;
+    }
+
+    .dot{
+      width:8px; height:8px;
+      border-radius:999px;
+      background: var(--a3);
+      box-shadow: 0 0 0 6px rgba(52,211,153,.12), 0 0 18px rgba(52,211,153,.35);
+      animation: pulse 1.6s ease-in-out infinite;
+    }
+    @keyframes pulse{
+      0%,100%{ transform: scale(1); opacity:1; }
+      50%{ transform: scale(1.12); opacity:.85; }
+    }
+
+    h1{
+      margin: 8px 0 8px;
+      font-size: 30px;
+      letter-spacing: .3px;
+      background: linear-gradient(90deg, #ffffff, var(--a3), var(--a2));
+      background-clip:text;
+      -webkit-background-clip:text;
+      color: transparent;
+      position:relative;
+      z-index:1;
+    }
+
+    .subtitle{
+      margin:0 0 18px;
+      color: var(--muted);
+      font-size: 14px;
+      line-height: 1.55;
+      position:relative;
+      z-index:1;
+    }
+
+    .successRow{
+      display:flex;
+      gap:12px;
+      align-items:flex-start;
+      padding: 14px 14px;
+      border-radius: 14px;
+      background: rgba(255,255,255,.05);
+      border: 1px solid rgba(255,255,255,.10);
+      position:relative;
+      z-index:1;
+      margin-bottom: 16px;
+    }
+
+    .check{
+      flex: 0 0 auto;
+      width: 40px;
+      height: 40px;
+      border-radius: 14px;
+      display:grid;
+      place-items:center;
+      background: linear-gradient(135deg, rgba(52,211,153,.18), rgba(34,211,238,.10));
+      border: 1px solid rgba(52,211,153,.22);
+      box-shadow: inset 0 1px 0 rgba(255,255,255,.10);
+    }
+
+    .check svg{
+      width: 22px;
+      height: 22px;
+      fill: none;
+      stroke: rgba(234,241,255,.95);
+      stroke-width: 2.6;
+      stroke-linecap: round;
+      stroke-linejoin: round;
+      filter: drop-shadow(0 10px 18px rgba(0,0,0,.28));
+    }
+
+    .successText strong{
+      display:block;
+      font-size: 14px;
+      margin-bottom: 4px;
+      letter-spacing:.2px;
+    }
+
+    .successText span{
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.45;
+    }
+
+    .actions{
+      display:flex;
+      gap:10px;
+      position:relative;
+      z-index:1;
+      flex-wrap:wrap;
+    }
+
+    .btn{
+      display:inline-flex;
+      align-items:center;
+      justify-content:center;
+      gap:10px;
+      padding: 12px 14px;
+      border-radius: 14px;
+      font-size: 14px;
+      font-weight: 750;
+      letter-spacing:.2px;
+      text-decoration:none;
+      border: 1px solid rgba(255,255,255,.14);
+      background: rgba(255,255,255,.06);
+      color: var(--fg);
+      transition: transform .14s ease, box-shadow .14s ease, filter .14s ease;
+      flex: 1 1 160px;
+      min-width: 160px;
+    }
+
+    .btn.primary{
+      color:#071018;
+      border: none;
+      background: linear-gradient(135deg, var(--a1), var(--a2), var(--a3));
+      box-shadow:
+        0 16px 44px rgba(34,211,238,.30),
+        inset 0 1px 0 rgba(255,255,255,.55);
+      position:relative;
+      overflow:hidden;
+    }
+
+    .btn.primary::before{
+      content:"";
+      position:absolute;
+      inset:0;
+      background: linear-gradient(110deg, transparent 10%, rgba(255,255,255,.55), transparent 55%);
+      transform: translateX(-120%);
+      opacity:.30;
+      transition: transform .5s ease;
+    }
+
+    .btn:hover{
+      transform: translateY(-2px);
+      filter: saturate(110%);
+    }
+    .btn.primary:hover::before{
+      transform: translateX(120%);
+    }
+    .btn:active{
+      transform: translateY(0);
+    }
+
+    .footer{
+      margin-top: 14px;
+      display:flex;
+      justify-content:space-between;
+      gap:12px;
+      color: rgba(154,167,191,.85);
+      font-size: 12px;
+      position:relative;
+      z-index:1;
+    }
+
+    @media (prefers-reduced-motion: reduce){
+      .blob, main.card, main.card::after, .dot { animation:none !important; }
+      .btn.primary::before{ transition:none; }
+    }
+  </style>
+</head>
+
+<body>
+  <div class="blob b1"></div>
+  <div class="blob b2"></div>
+  <div class="blob b3"></div>
+  <div class="blob b4"></div>
+
+  <main class="card">
+    <div class="toprow">
+      <div class="badge"><span class="dot"></span> Authorization complete</div>
+      <div class="badge">OpenStreamKit</div>
+    </div>
+
+    <h1>You’re linked ✅</h1>
+    <p class="subtitle">
+      Kick is now authorized for this local server.
+      <br />
+      You can close this tab or continue to the app.
+    </p>
+
+    <div class="successRow">
+      <div class="check" aria-hidden="true">
+        <svg viewBox="0 0 24 24">
+          <path d="M20 6L9 17l-5-5"></path>
+        </svg>
+      </div>
+      <div class="successText">
+        <strong>Tokens stored locally</strong>
+        <span>
+          Your OAuth credentials are saved on this machine (where your server runs).
+          If you ever rotate them, just re-auth here.
+        </span>
+      </div>
+    </div>
+
+    <div class="actions">
+      <!-- Change these hrefs to whatever your app uses -->
+      <a class="btn primary" href="/">
+        Continue
+      </a>
+      <a class="btn" href="https://github.com/AnthonyMosley/OpenStreamKit?tab=readme-ov-file#readme">
+        API Docs
+      </a>
+    </div>
+
+    <div class="footer">
+      <span>Localhost 🛡️</span>
+      <span>Event-driven ⚡</span>
+    </div>
+
+    <!-- OPTIONAL: If you later want to show a code/token, here’s a nice block.
+    <div style="margin-top:14px; position:relative; z-index:1;">
+      <div style="color:var(--muted); font-size:12px; margin-bottom:8px;">Session</div>
+      <pre style="margin:0; padding:12px 12px; border-radius:14px; background:rgba(255,255,255,.05); border:1px solid rgba(255,255,255,.10); overflow:auto;">{{ token_preview }}</pre>
+    </div>
+    -->
+  </main>
+</body>
+</html>
