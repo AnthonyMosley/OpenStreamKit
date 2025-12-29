@@ -49,6 +49,7 @@ log = logging.getLogger("openstreamkit")
 # ---------- Debug Flags ----------
 DEBUG_PAYLOADS = os.getenv("DEBUG_PAYLOADS", "0") == "1"
 JSON_DIR = "json"
+DISABLE_DOCS = os.getenv("DISABLE_DOCS", "0") == "1"
 # ---------- Local Files ----------
 TOKEN_FILE = os.getenv("TOKEN_FILE", "token.json")
 LAST_WEBHOOK_FILE = os.getenv("LAST_WEBHOOK_FILE", "last_webhook.json")
@@ -116,7 +117,12 @@ if saved and "access_token" in saved:
     TOKENS["access_token"] = saved["access_token"]
 
 # ===================================================================== EVENT HANDLERS / ROUTES =====================================================================
-app = FastAPI()
+app = FastAPI(
+    docs_url=None if DISABLE_DOCS else "/docs",
+    redoc_url=None if DISABLE_DOCS else "/redoc",
+    openapi_url=None if DISABLE_DOCS else "/openapi.json",
+)
+
 
 @app.get("/login")
 def login():
