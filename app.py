@@ -1,5 +1,5 @@
 """
-KickBot (learning-first)
+OpenStreamKit (learning-first)
 
 This project is written to be approachable for beginners:
 - clear sections (imports → config → helpers → startup → routes)

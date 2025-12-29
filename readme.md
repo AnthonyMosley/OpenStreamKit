@@ -39,6 +39,47 @@ The long-term goal is to provide:
 - **Event-driven architecture**  
   Stream events are inputs. What happens next is entirely up to you.
 
+- **Documentation as Code**  
+  Every functional source file has a fully explained twin that breaks the logic down word-by-word.
+
+---
+
+## 📚 Teaching-First Codebase (Important)
+
+OpenStreamKit is built as a **paired-file system**.
+
+For **every functional Python file**, there is a corresponding **teaching twin** that contains the **exact same code and behavior**, but with extremely detailed explanations.
+
+Example:
+
+```
+app.py
+app_EXTREMECOMMENTS.py
+```
+
+- `app.py`  
+  - The runnable version  
+  - Clean, readable, practical comments  
+  - The file you actually run with Uvicorn
+
+- `app_EXTREMECOMMENTS.py`  
+  - A teaching mirror of `app.py`  
+  - Same logic, same flow, same behavior  
+  - Contains line-by-line explanations, mental models, and architectural context
+
+**Rules of the twin system**
+- No behavioral differences between twins
+- Only comments, whitespace, and explanations may differ
+- If behavior diverges, it is considered a bug
+
+This allows:
+- Beginners to *learn by reading real production code*
+- Contributors to understand intent, not just implementation
+- The project to act as both a tool **and** a guidebook
+
+If you want to **run** OpenStreamKit, use the normal files.  
+If you want to **learn** how it works, read the `*_EXTREMECOMMENTS.py` files.
+
 ---
 
 ## 🛠 Current Features
@@ -74,6 +115,8 @@ The codebase is intentionally kept in a single, readable flow:
 - **Helper Functions** – small reusable logic  
 - **Startup Logic** – runs once on launch  
 - **Event Handlers / Routes** – where behavior lives  
+
+Each functional file has a teaching twin with the same structure and logic.
 
 Runtime JSON artifacts (tokens, webhook snapshots) are written to a local `json/` directory and ignored by git.
 
@@ -123,6 +166,10 @@ KICK_WEBHOOK_PUBLIC_URL=https://your-public-url
 python -m uvicorn app:app --host 0.0.0.0 --port 8000 --reload
 ```
 
+> **Note:**  
+> `uvicorn app:app` explicitly tells Uvicorn to run `app.py`.  
+> Teaching files (like `app_EXTREMECOMMENTS.py`) are **not executed** unless explicitly targeted.
+
 ---
 
 ## 🧪 Debugging
@@ -143,6 +190,11 @@ This project is intentionally beginner-friendly.
 - Small, focused contributions are welcome
 - Code clarity is valued over cleverness
 - If you can explain *why* a change exists, it belongs here
+
+If you add new functionality:
+- Add a teaching twin
+- Preserve logic parity
+- Treat explanations as first-class
 
 Issues, discussions, and pull requests are encouraged.
 
