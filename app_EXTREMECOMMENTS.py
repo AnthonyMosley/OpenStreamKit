@@ -1,3 +1,4 @@
+# app_EXTREMECOMMENTS.py
 """
 OpenStreamKit (learning-first)
 
@@ -17,21 +18,34 @@ RULES:
 - The executable behavior should match the non-teaching version.
 - Only comments, whitespace, and explanations should differ.
 - If the code behaves differently than the non-teaching twin, treat that as a bug.
+
+Big change in this version:
+- OAuth/PKCE/Subscribe logic has been moved into kick.py
+- app.py is now “the web server + UI routing + webhook ingest”
+- kick.py is “Kick-specific API/OAuth brain”
 """
+
 # ===================================================================== IMPORTS =====================================================================
 # Imports are the “tools on the workbench”.
 # Reading them top to bottom tells you what this app is capable of doing.
-
-# --- PKCE / OAuth helpers ---
-import base64   # Used to base64-url encode bytes (PKCE challenge)
-import hashlib  # Used to SHA-256 hash the PKCE verifier (PKCE S256)
+#
+# In the previous version, app.py imported PKCE helpers and built OAuth URLs itself.
+# In the NEW version, app.py delegates Kick-specific behavior to a local module: kick.py.
 
 # --- Data / logging / OS ---
 import json     # Read/write JSON files (tokens, payload snapshots)
 import logging  # Structured logs with levels (INFO/WARNING/ERROR)
 import os       # Environment variables + file paths
-import requests # HTTP client for talking to Kick OAuth + Kick API
-import secrets  # Cryptographically secure random strings (PKCE + state)
+
+import urllib.parse
+# urllib.parse helps safely encode strings for URLs (especially error messages).
+# Example: turning "Invalid login session." into "Invalid%20login%20session."
+
+# --- HTTP ---
+import requests
+# requests is an HTTP client. In *this* file, we mainly use it for the exception type
+# (requests.RequestException) during error handling.
+# The actual Kick HTTP calls happen inside kick.py.
 
 # --- Fancy logging output ---
 from colorlog import ColoredFormatter  # Adds colors to log output (nice for humans)
@@ -40,32 +54,38 @@ from colorlog import ColoredFormatter  # Adds colors to log output (nice for hum
 from dotenv import load_dotenv  # Loads .env into environment variables
 
 # --- FastAPI framework pieces ---
-from fastapi import Body, FastAPI, Request
+from fastapi import Body, FastAPI, Header, Request
 # Body(...) tells FastAPI “parse JSON body into this parameter”
+# Header(...) lets us read request headers (Accept)
 # Request gives access to request info (needed for templates)
-from fastapi import Header
-# Header(...) lets us read HTTP headers (here: Accept) to decide JSON vs HTML response
 
 # --- Responses / UI routing ---
 from fastapi.responses import HTMLResponse, RedirectResponse
-# HTMLResponse tells FastAPI "this returns HTML"
+# HTMLResponse tells FastAPI "this route returns HTML"
 # RedirectResponse sends user to another URL (browser-friendly flow)
 
 # --- Serving front-end assets ---
 from fastapi.staticfiles import StaticFiles
-# StaticFiles serves files like CSS/JS/images
+# StaticFiles serves CSS/JS/images
 from fastapi.templating import Jinja2Templates
-# Jinja2Templates lets us render HTML templates with variables
+# Jinja2Templates renders HTML templates with variables
 
-import urllib.parse
-# urllib.parse helps build and safely encode URLs and query parameters.
-# We use it for:
-# - building the Kick OAuth authorize URL
-# - URL-encoding error messages for redirects
+import kick  # local module (kick.py)
+# This is the major refactor:
+# - kick.py now owns Kick-specific logic:
+#   - start_login()   -> build auth URL, store state/verifier internally
+#   - pop_verifier()  -> retrieve verifier for callback validation
+#   - exchange_code_for_token() -> token exchange with Kick OAuth
+#   - do_subscribe()  -> subscribe to events
+#   - WEBHOOK_URL     -> webhook URL/config shared with templates
+#
+# Result:
+# - app.py stays small and readable
+# - kick.py becomes the “Kick integration” module
 
 # ===================================================================== CONFIG / CONSTANTS =====================================================================
 # Configuration = “things that can change without changing the logic”.
-# Typically: env vars, file paths, debug flags, URLs.
+# Typically: env vars, file paths, debug flags.
 
 # Load environment variables from .env
 # MUST happen before reading os.environ / os.getenv.
@@ -87,10 +107,10 @@ handler.setFormatter(
         "%(log_color)s%(asctime)s | %(levelname)s | %(message)s",
         # A mapping of level name -> color name
         log_colors={
-            "DEBUG":    "cyan",
-            "INFO":     "green",
-            "WARNING":  "yellow",
-            "ERROR":    "red",
+            "DEBUG": "cyan",
+            "INFO": "green",
+            "WARNING": "yellow",
+            "ERROR": "red",
             "CRITICAL": "bold_red",
         },
     )
@@ -103,7 +123,7 @@ handler.setFormatter(
 logging.basicConfig(level=getattr(logging, LOG_LEVEL, logging.INFO), handlers=[handler])
 
 # Create a named logger for this app.
-# Using a named logger lets you filter logs per module later if you split files.
+# Using a named logger helps later if you split the code into multiple modules.
 log = logging.getLogger("openstreamkit")
 
 # ---------- Debug Flags ----------
@@ -115,8 +135,9 @@ DEBUG_PAYLOADS = os.getenv("DEBUG_PAYLOADS", "0") == "1"
 # JSON_DIR is a folder where we store runtime artifacts:
 # - token.json
 # - last webhook payload
+# - last chat/follow snapshots (optional)
 # - last subscribe response
-JSON_DIR = "json"
+JSON_DIR = os.getenv("JSON_DIR", "json")
 
 # DISABLE_DOCS toggles FastAPI's /docs, /redoc, /openapi.json endpoints.
 # Useful if you don't want to expose docs publicly when hosting.
@@ -129,73 +150,37 @@ TOKEN_FILE = os.getenv("TOKEN_FILE", "token.json")
 # LAST_WEBHOOK_FILE: where we persist the most recent webhook payload (debug).
 LAST_WEBHOOK_FILE = os.getenv("LAST_WEBHOOK_FILE", "last_webhook.json")
 
-# ---------- Kick OAuth / API ----------
-# OAuth host = login/token exchange server
-OAUTH_HOST = "https://id.kick.com"
-
-# API host = main Kick API server
-API_HOST = "https://api.kick.com"
-
-# REDIRECT_URI is where Kick sends the user after login authorization.
-# Must match what is configured in your Kick developer application.
-REDIRECT_URI = os.getenv("KICK_REDIRECT_URI", "http://localhost:8000/callback")
-
-# WEBHOOK_URL is the URL Kick will call with events.
-# KICK_WEBHOOK_PUBLIC_URL should be a public URL (often a tunnel).
-WEBHOOK_URL = f"{os.environ['KICK_WEBHOOK_PUBLIC_URL']}/kick/webhook"
-
-# Required env vars (fail fast with a clear error)
-# Using os.environ["NAME"] intentionally throws KeyError if missing.
-# That is GOOD in this situation: we want a loud failure, not a silent broken app.
-CLIENT_ID = os.environ["KICK_CLIENT_ID"]
-CLIENT_SECRET = os.environ["KICK_CLIENT_SECRET"]
-
 # ---------- In-memory Runtime State ----------
-# These dicts are stored in RAM only. If the server restarts, they reset.
-# Anything important should be persisted to disk (token.json etc).
-PKCE_STORE: dict[str, str] = {}
-# PKCE_STORE maps: state -> verifier
-# "state" comes from /login and returns to us at /callback
-# "verifier" is the secret used in PKCE for the token exchange.
-
+# In-memory state disappears on server restart.
+# So: if you need it across restarts, save it to disk.
 TOKENS: dict[str, str] = {}
-# TOKENS holds the access token so we don't have to reread from disk every request.
 
-
-# ===================================================================== HELPER FUNCTIONS =====================================================================
-# Helpers are “small tools” the rest of the code uses.
-# Keeping them here:
-# - reduces duplication
-# - keeps routes shorter and easier to understand
+# =====================================================================
+# ACTION HELPERS
+# (Side effects: file IO, logging, state mutation)
+# =====================================================================
 
 def save_json(data: dict, filename: str) -> None:
     """
-    Save a Python dict to a JSON file inside JSON_DIR.
+    Save JSON into JSON_DIR/filename.
+    filename should be a simple name like "token.json".
 
     Why this exists:
-    - We write JSON files in multiple places (token, payload snapshots, responses).
-    - Centralizing it avoids repeating open(...)/json.dump(...) everywhere.
-
-    Parameters:
-    - data: the dict you want to save (must be JSON-serializable)
-    - filename: the file name inside JSON_DIR (e.g. "token.json")
+    - We save multiple artifacts in multiple places.
+    - Centralizing keeps behavior consistent and reduces copy/paste.
     """
-    with open(os.path.join(JSON_DIR, filename), "w", encoding="utf-8") as f:
+    path = os.path.join(JSON_DIR, filename)
+    with open(path, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2)
 
 
 def load_token() -> dict | None:
     """
-    Load token JSON from disk if it exists.
+    Load saved OAuth token from disk if present.
 
     Returns:
-    - dict: token data if file exists
-    - None: if file does not exist
-
-    Important:
-    - We only catch FileNotFoundError.
-    - If the JSON is corrupted, json.load(...) will throw (and that's okay).
-      A corrupted token should be visible, not silently ignored.
+    - dict if token file exists
+    - None if not found (normal on first run)
     """
     try:
         path = os.path.join(JSON_DIR, TOKEN_FILE)
@@ -205,113 +190,57 @@ def load_token() -> dict | None:
         return None
 
 
-def pkce_verifier():
-    """
-    Generate a PKCE verifier (secret random string).
-
-    PKCE mental model:
-    - verifier = secret password you keep
-    - challenge = hash(verifier) you show publicly
-    - later you prove you know the verifier by sending it during token exchange
-    """
-    return secrets.token_urlsafe(64)
-
-
-def pkce_challenge_s256(verifier: str) -> str:
-    """
-    Convert verifier -> PKCE challenge using SHA-256 (S256 method).
-
-    Steps:
-    1) hash verifier bytes with SHA-256
-    2) base64-url encode the digest
-    3) strip '=' padding because OAuth PKCE expects base64url without padding
-    """
-    digest = hashlib.sha256(verifier.encode()).digest()
-    return base64.urlsafe_b64encode(digest).decode().rstrip("=")
-
-
-def handle_chat_message(payload):
-    """
-    Handle a Kick chat.message.sent event.
-
-    payload is expected to include:
-    - sender.username
-    - content
-
-    This handler:
-    - logs a nice readable line to terminal
-    - optionally saves payload to json/last_chat.json when DEBUG_PAYLOADS=1
-    """
+def log_chat_message(payload: dict):
+    """Side-effect: log + optionally persist a chat message."""
     sender = payload.get("sender", {}).get("username", "unknown")
     content = payload.get("content", "")
-    log.info(f"[CHAT] {sender}: {content}")
+    log.info("[CHAT] %s: %s", sender, content)
 
     if DEBUG_PAYLOADS:
         save_json(payload, "last_chat.json")
 
 
-def handle_follow(payload):
-    """
-    Handle a Kick channel.followed event.
-
-    payload is expected to include:
-    - follower.username
-
-    This handler:
-    - logs the follower name
-    - optionally saves payload to json/last_follow.json when DEBUG_PAYLOADS=1
-    """
+def log_follow_event(payload: dict):
+    """Side-effect: log + optionally persist a follow event."""
     user = payload.get("follower", {}).get("username", "unknown")
-    log.info(f"[FOLLOW] {user}")
+    log.info("[FOLLOW] %s", user)
 
     if DEBUG_PAYLOADS:
         save_json(payload, "last_follow.json")
 
+# =====================================================================
+# DESCRIPTOR FUNCTIONS
+# (Interpret inputs and decide what action to take)
+# =====================================================================
 
-def do_subscribe(access_token: str) -> dict:
+def describe_kick_payload(payload: dict) -> str:
     """
-    Subscribe to multiple Kick events in one API call.
+    Inspect an incoming Kick webhook payload and classify it.
 
-    Why this is a helper:
-    - /callback does auto-subscribe after login
-    - /subscribe allows manual retry
-    - /subscribe-ui does a UI-friendly retry
-    All three want the same subscription logic.
+    Returns:
+        - "chat"
+        - "follow"
+        - "unknown"
 
-    Returns a dict with:
-    - status_code: HTTP status
-    - text: raw response body
-    - json: parsed JSON response if response is JSON, else None
+    Why a descriptor?
+    - It keeps /kick/webhook clean.
+    - It separates “understanding” from “doing”.
+
+    How this works:
+    - We detect event type by “shape” (which keys exist).
+    - Later you could upgrade to explicit event.type parsing if Kick provides it.
     """
-    body = {
-        "events": [
-            {"name": "chat.message.sent", "version": 1},
-            {"name": "channel.followed", "version": 1},
-            {"name": "channel.subscription.created", "version": 1},
-            {"name": "channel.subscription.gifted", "version": 1},
-        ],
-        # method tells Kick how to deliver events.
-        # "webhook" means: Kick POSTs to your webhook URL.
-        "method": "webhook",
-    }
+    if "message_id" in payload and "sender" in payload and "content" in payload:
+        return "chat"
 
-    # POST to Kick's subscriptions endpoint.
-    # Authorization header must include Bearer token.
-    r = requests.post(
-        f"{API_HOST}/public/v1/events/subscriptions",
-        json=body,
-        headers={"Authorization": f"Bearer {access_token}"},
-        timeout=20,
-    )
+    if "follower" in payload:
+        return "follow"
 
-    return {
-        "status_code": r.status_code,
-        "text": r.text,
-        "json": r.json() if r.headers.get("content-type", "").startswith("application/json") else None,
-    }
+    return "unknown"
 
-# ===================================================================== STARTUP LOGIC (RUNS ONCE) =====================================================================
-# This section runs when the Python module is imported (when uvicorn starts).
+# =====================================================================
+# STARTUP LOGIC (RUNS ONCE)
+# =====================================================================
 
 # Ensure json/ directory exists so saves don't fail.
 os.makedirs(JSON_DIR, exist_ok=True)
@@ -320,9 +249,11 @@ os.makedirs(JSON_DIR, exist_ok=True)
 saved = load_token()
 if saved and "access_token" in saved:
     TOKENS["access_token"] = saved["access_token"]
+    log.info("Loaded token from %s/%s", JSON_DIR, TOKEN_FILE)
 
-# ===================================================================== EVENT HANDLERS / ROUTES =====================================================================
-# Routes are the HTTP endpoints your browser and Kick will hit.
+# =====================================================================
+# FASTAPI APP SETUP
+# =====================================================================
 
 # Create the FastAPI app.
 # docs_url/redoc_url/openapi_url are disabled when DISABLE_DOCS=1
@@ -332,71 +263,39 @@ app = FastAPI(
     openapi_url=None if DISABLE_DOCS else "/openapi.json",
 )
 
-# Serve the /static path from the local "web" directory.
-# That means files like:
-# - web/style.css
-# - web/app.js
-# - web/logo.png
-# can be requested at:
-# - /static/style.css
-# - /static/app.js
-# - /static/logo.png
+# Serve templates/static from ./web
 app.mount("/static", StaticFiles(directory="web"), name="static")
-
-# Jinja2Templates lets us render HTML templates from the web/ directory.
-# So "index.html" means "web/index.html"
 templates = Jinja2Templates(directory="web")
 
+# =====================================================================
+# ROUTES — UI / AUTH FLOW
+# =====================================================================
 
 @app.get("/")
 def root():
-    """
-    Root route:
-    If someone visits the site without a path, redirect them to /login.
-
-    Why redirect?
-    - This app's primary user flow begins at /login
-    - It also gives a nice “landing page” experience if /login is HTML
-    """
+    # Simple UX: visiting the root redirects to the login page.
     return RedirectResponse("/login")
 
 
 @app.get("/login", response_class=HTMLResponse)
 def login_page(request: Request):
     """
-    Login UI route (HTML page):
-    - Generates PKCE verifier/challenge + state
-    - Builds Kick OAuth authorize URL
-    - Renders web/index.html with the auth_url injected
+    Login UI route.
 
-    Important:
-    - This replaces the old “return JSON with open_this_url” pattern
-      with a friendlier UI.
+    New behavior:
+    - Instead of building auth URL here, we call kick.start_login()
+
+    kick.start_login():
+    - generates PKCE verifier + challenge
+    - generates state (anti-CSRF + correlation token)
+    - stores verifier keyed by state *inside kick.py*
+    - returns (auth_url, state)
     """
-    verifier = pkce_verifier()
-    challenge = pkce_challenge_s256(verifier)
-    state = secrets.token_urlsafe(16)
+    auth_url, _state = kick.start_login()
+    # We don't need _state here because:
+    # - the browser will carry state into the /callback querystring
+    # - kick.py will use that state to look up the verifier
 
-    # Store verifier keyed by state so /callback can retrieve it.
-    PKCE_STORE[state] = verifier
-
-    # OAuth authorize query parameters
-    q = {
-        "response_type": "code",
-        "client_id": CLIENT_ID,
-        "redirect_uri": REDIRECT_URI,
-        "scope": "events:subscribe",
-        "code_challenge": challenge,
-        "code_challenge_method": "S256",
-        "state": state,
-    }
-
-    # Full URL user will be sent to for Kick login/consent
-    auth_url = f"{OAUTH_HOST}/oauth/authorize?{urllib.parse.urlencode(q)}"
-
-    # Render template web/index.html with variables:
-    # - request (required by FastAPI templating)
-    # - auth_url (used by the page to make a login button/link)
     return templates.TemplateResponse(
         "index.html",
         {
@@ -408,26 +307,14 @@ def login_page(request: Request):
 
 @app.get("/success", response_class=HTMLResponse)
 def success_page(request: Request):
-    """
-    Simple success page.
-    Used after:
-    - OAuth succeeds AND subscription succeeds
-    - manual subscribe retry succeeds
-    """
+    # Display a friendly success page after OAuth+subscribe flow.
     return templates.TemplateResponse("success.html", {"request": request})
 
 
 @app.get("/failure", response_class=HTMLResponse)
 def failure_page(request: Request, msg: str | None = None):
-    """
-    Failure page.
-
-    msg comes from query parameter ?msg=...
-    Example:
-      /failure?msg=No%20token%20yet
-
-    We keep messages URL-encoded when redirecting, then show them here.
-    """
+    # Display a friendly failure page.
+    # msg is optional and comes from query string: /failure?msg=...
     return templates.TemplateResponse("failure.html", {"request": request, "message": msg})
 
 
@@ -435,209 +322,107 @@ def failure_page(request: Request, msg: str | None = None):
 def partial_success_page(request: Request, msg: str | None = None):
     """
     Partial success page:
-    - OAuth login worked
-    - But subscription creation failed
+    - OAuth was successful
+    - but subscription failed
 
-    We show the webhook URL so users can confirm it’s correct,
-    and we point them to the saved debug file.
+    The template can show:
+    - a clean message
+    - the webhook URL (so users can verify their tunnel URL)
     """
     return templates.TemplateResponse(
         "partial_success.html",
         {
             "request": request,
             "message": msg,
-            "webhook_url": WEBHOOK_URL,
+            "webhook_url": kick.WEBHOOK_URL,
         },
     )
 
+# =====================================================================
+# ROUTES — OAUTH CALLBACK / SUBSCRIPTION
+# =====================================================================
 
 @app.get("/callback")
 def callback(code: str, state: str):
     """
     OAuth callback endpoint.
 
-    Kick redirects the user here with:
+    Kick redirects the browser here with:
     - code: short-lived authorization code
-    - state: must match the value we generated earlier
+    - state: must match the state we generated earlier
 
-    We then:
-    1) validate state and get PKCE verifier
-    2) exchange code + verifier for an access token
-    3) save token
-    4) auto-subscribe to events
-    5) redirect user to success/partial-success/failure UI
+    Flow:
+    1) ask kick.py for the verifier using the state
+    2) exchange code + verifier for a token
+    3) save token to disk (persist)
+    4) subscribe to events
+    5) redirect to success / partial-success / failure
     """
-    verifier = PKCE_STORE.pop(state, None)
+    verifier = kick.pop_verifier(state)
     if not verifier:
-        # This usually happens when:
-        # - server restarted (PKCE_STORE cleared)
-        # - user used an old callback URL
-        # - state was tampered with
-        log.warning("OAuth callback with invalid or expired state")
-        msg = urllib.parse.quote("Invalid or expired login session (state). Please try again.")
+        # Most common causes:
+        # - server restarted (kick.py memory store cleared)
+        # - user clicked an old callback URL
+        msg = urllib.parse.quote("Invalid or expired login session.")
         return RedirectResponse(f"/failure?msg={msg}", status_code=302)
-
-    # Data for token exchange request
-    data = {
-        "grant_type": "authorization_code",
-        "client_id": CLIENT_ID,
-        "client_secret": CLIENT_SECRET,
-        "redirect_uri": REDIRECT_URI,
-        "code_verifier": verifier,  # proves we are the original /login request
-        "code": code,
-    }
 
     try:
-        # Exchange authorization code for token.
-        # OAuth token endpoints typically expect application/x-www-form-urlencoded.
-        r = requests.post(
-            f"{OAUTH_HOST}/oauth/token",
-            data=data,
-            headers={"Content-Type": "application/x-www-form-urlencoded"},
-            timeout=20,
-        )
-        r.raise_for_status()
+        token = kick.exchange_code_for_token(code, verifier)
     except requests.RequestException as e:
-        # If the HTTP request fails or returns an error status,
-        # we log detailed info server-side and show a clean message to the user.
-        status = getattr(getattr(e, "response", None), "status_code", None)
-        body = getattr(getattr(e, "response", None), "text", "")
-        log.error("Token exchange failed. status=%s body=%s err=%s", status, body, e)
-
-        clean = "Token exchange failed. Check redirect URI + client credentials."
-        msg = urllib.parse.quote(clean)
+        # We keep the user-facing message simple,
+        # and log the detailed exception for debugging.
+        log.error("Token exchange failed: %s", e)
+        msg = urllib.parse.quote("Token exchange failed.")
         return RedirectResponse(f"/failure?msg={msg}", status_code=302)
 
-    # Parse token response JSON.
-    token = r.json()
-
-    # Persist token so a server restart still has access.
+    # Persist token response (so restarts don't require relogin).
     save_json(token, TOKEN_FILE)
 
-    # Grab access token from response
-    access_token = token["access_token"]
-
-    # Store token in memory for quick use
-    TOKENS["access_token"] = access_token
-
-    # Automatically attempt to subscribe right after auth.
-    sub = do_subscribe(access_token)
-
-    # Save subscription response for debugging.
-    save_json(sub, "last_subscribe_response.json")
-
-    log.info("Auto-subscribe: %s", sub["status_code"])
-
-    # If subscription failed, we still consider OAuth a success,
-    # so we show partial-success page and instruct user where to look.
-    if sub.get("status_code", 0) >= 400:
-        msg = urllib.parse.quote(
-            "Authorized OK, but event subscription failed. See json/last_subscribe_response.json."
-        )
-        return RedirectResponse(f"/partial-success?msg={msg}", status_code=302)
-
-    return RedirectResponse("/success", status_code=302)
-
-
-@app.post("/subscribe")
-def subscribe(accept: str | None = Header(default=None)):
-    """
-    Manual subscription endpoint.
-
-    Why this exists:
-    - Sometimes subscription fails temporarily
-    - Sometimes you want to re-run subscribe without logging in again
-    - This endpoint can return JSON or redirect HTML based on the Accept header
-
-    Accept header behavior:
-    - If client says it accepts text/html -> we redirect to UI pages
-    - Otherwise -> return JSON (API style)
-    """
-    access_token = TOKENS.get("access_token")
+    access_token = token.get("access_token")
     if not access_token:
-        # If browser wants HTML, redirect to a friendly failure page.
-        if accept and "text/html" in accept:
-            msg = urllib.parse.quote("No token yet. Go to /login first.")
-            return RedirectResponse(f"/failure?msg={msg}", status_code=302)
-        # Otherwise return JSON error (API caller)
-        return {"error": "No token yet. Go to /login first."}
-
-    # Attempt subscription
-    result = do_subscribe(access_token)
-
-    # Save result so user can inspect the exact API response
-    save_json(result, "last_subscribe_response.json")
-
-    # If browser wants HTML, redirect to a UI page based on status.
-    if accept and "text/html" in accept:
-        if result.get("status_code", 0) >= 400:
-            msg = urllib.parse.quote("Retry failed. Check json/last_subscribe_response.json.")
-            return RedirectResponse(f"/partial-success?msg={msg}", status_code=302)
-        return RedirectResponse("/success", status_code=302)
-
-    # Otherwise return JSON for API callers.
-    return result
-
-
-@app.get("/subscribe-ui")
-def subscribe_ui():
-    """
-    Convenience UI endpoint for re-subscribing.
-
-    Differences from /subscribe:
-    - always redirects to HTML pages
-    - no Accept header logic
-    - feels nicer for a human clicking buttons
-    """
-    access_token = TOKENS.get("access_token")
-    if not access_token:
-        msg = urllib.parse.quote("No token available. Please log in first.")
+        # Defensive: if API changed or response is malformed
+        msg = urllib.parse.quote("Login succeeded but no access token returned.")
         return RedirectResponse(f"/failure?msg={msg}", status_code=302)
 
-    result = do_subscribe(access_token)
-    save_json(result, "last_subscribe_response.json")
+    TOKENS["access_token"] = access_token
 
-    if result.get("status_code", 0) >= 400:
-        msg = urllib.parse.quote(
-            "Subscription retry failed. Check json/last_subscribe_response.json."
-        )
+    # Subscribe to events so Kick starts sending webhook payloads.
+    sub = kick.do_subscribe(access_token)
+    save_json(sub, "last_subscribe_response.json")
+
+    if sub.get("status_code", 0) >= 400:
+        msg = urllib.parse.quote("Subscribed failed. See logs.")
         return RedirectResponse(f"/partial-success?msg={msg}", status_code=302)
 
     return RedirectResponse("/success", status_code=302)
 
+# =====================================================================
+# ROUTES — WEBHOOK INGEST
+# =====================================================================
 
 @app.post("/kick/webhook")
 async def kick_webhook(payload: dict = Body(...)):
     """
-    Webhook endpoint (Kick calls THIS).
+    Webhook ingest endpoint.
 
-    Kick will POST event payloads to:
-      {KICK_WEBHOOK_PUBLIC_URL}/kick/webhook
-
-    FastAPI detail:
-    - payload: dict = Body(...) means FastAPI will parse JSON automatically
-      and hand you a Python dict.
+    Kick will POST events here.
+    We:
+    1) optionally save the raw payload (debug)
+    2) classify it (chat/follow/unknown)
+    3) run the relevant handler
     """
-
     if DEBUG_PAYLOADS:
-        # Save the raw payload. Great for learning the schema of events.
         save_json(payload, LAST_WEBHOOK_FILE)
 
-    # “Shape detection”:
-    # We inspect the payload keys to decide which handler should run.
-    #
-    # This is beginner-friendly and works fine early on.
-    # Later, you might implement:
-    # - explicit event type field parsing
-    # - pydantic models for payload schemas
-    if "message_id" in payload and "sender" in payload and "content" in payload:
-        handle_chat_message(payload)
-        return {"ok": True}
-    elif "follower" in payload:
-        handle_follow(payload)
+    event_type = describe_kick_payload(payload)
+
+    if event_type == "chat":
+        log_chat_message(payload)
         return {"ok": True}
 
-    # If we got here, we don't recognize the payload structure.
-    # Log keys so we can learn and add support later.
+    if event_type == "follow":
+        log_follow_event(payload)
+        return {"ok": True}
+
     log.error("Unknown payload shape. keys=%s", list(payload.keys()))
     return {"ok": True}
